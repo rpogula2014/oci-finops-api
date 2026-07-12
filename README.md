@@ -20,7 +20,7 @@ The view is expected to expose these normalized columns in addition to the OCI r
 | `resource_type` | `rtype` | `ATD-Ops.ResourceType` |
 | `resource_name` | `rname` | `ATD-Ops.ResourceName` |
 
-When `rname` is blank, resource responses use `untagged · product_description`.
+When `rname` is blank, every resource-name API value uses the composite `untagged · <product_service> · …<OCID tail>`. This is the canonical breakdown, filter-option, and filter value; it round-trips verbatim. This replaces the prior description-based value, so existing `resource_name=__untagged__` links no longer match.
 
 ## Routes
 
@@ -30,7 +30,7 @@ When `rname` is blank, resource responses use `untagged · product_description`.
 - `GET /v1/costs/timeseries?granularity=hour|day|month`
 - `GET /v1/costs/breakdown?dimension=service|compartment|environment|cost_center|component_type|resource_type|resource_name&series=true&granularity=day` — `series=true` adds each row's `{date, cost}` series at the selected granularity. In series mode the row `cost` and every series `cost` are decimal strings (never floats — parse only at display); the default mode keeps the numeric `cost` unchanged.
 - `GET /v1/costs/resources?page=1&limit=50&sort=cost&direction=desc`
-- `GET /v1/costs/resources/{ocid}`
+- `GET /v1/costs/resources/{ocid}` — accepts the shared date and dimension filters in addition to the path OCID, so detail cost stays scoped to the originating Resources view
 - `GET /v1/costs/lineitems?resource_name=X&granularity=day|week|month` (or `ocid=X`) — bucketed cost detail under shared filters; resource name and OCID are optional narrowers, and granularity defaults to day
 - `GET /v1/costs/filters` — accepts the shared filters and returns only values valid under them, enabling cascading filter controls.
 - `GET /v1/costs/freshness`
@@ -41,7 +41,7 @@ When `rname` is blank, resource responses use `untagged · product_description`.
 
 Structured JSON via `log/slog` on stdout. `LOG_LEVEL` env: debug|info|warn|error (default info). Every request is logged with method, path, status, duration_ms, and request_id.
 
-Shared filters: `start`, `end`, `env`, `cost_center`, `component_type`, `compartment`, `service`, `resource_type`, `resource_name`, and `ocid`. Pass `__untagged__` for any dimension filter to select its blank values. Timestamps are RFC3339. The default range is one month, the maximum is 400 days, breakdowns are limited to 100 rows, and resource pages to 500 rows.
+Shared filters: `start`, `end`, `env`, `cost_center`, `component_type`, `compartment`, `service`, `resource_type`, `resource_name`, and `ocid`. Pass `__untagged__` for blank values except `resource_name`: blank resource-name tags are exposed only through their canonical composite `untagged · <product_service> · …<OCID tail>` value. Timestamps are RFC3339. The default range is one month, the maximum is 400 days, breakdowns are limited to 100 rows, and resource pages to 500 rows.
 
 All values are bound with ClickHouse placeholders. The only interpolated SQL fragments are service-owned allowlisted dimensions, sort columns/directions, and time buckets. Cost is always `cost_attributedcost` from the reconciled attributed view. Currency remains a grouping dimension so unlike currencies are never silently summed together.
 

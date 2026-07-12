@@ -8,16 +8,17 @@ import (
 // The source view exposes raw OCI tags as Map(String, String); normalized
 // dimension columns do not exist, so every tag dimension is a map lookup.
 const (
-	envExpr   = "tags['ATD-Billing.Environment']"
-	ccExpr    = "tags['ATD-Billing.CostCenter']"
-	compExpr  = "tags['ATD-Billing.ComponentType']"
-	rtypeExpr = "tags['ATD-Ops.ResourceType']"
-	rnameExpr = "tags['ATD-Ops.ResourceName']"
+	envExpr          = "tags['ATD-Billing.Environment']"
+	ccExpr           = "tags['ATD-Billing.CostCenter']"
+	compExpr         = "tags['ATD-Billing.ComponentType']"
+	rtypeExpr        = "tags['ATD-Ops.ResourceType']"
+	rnameExpr        = "tags['ATD-Ops.ResourceName']"
+	rnameDisplayExpr = "if(empty(" + rnameExpr + "), concat('untagged · ', product_service, ' · …', right(product_resourceid, 8)), " + rnameExpr + ")"
 )
 
 var dimensions = map[string]string{
 	"service": "product_service", "compartment": "product_compartmentname", "environment": envExpr,
-	"cost_center": ccExpr, "component_type": compExpr, "resource_type": rtypeExpr, "resource_name": rnameExpr,
+	"cost_center": ccExpr, "component_type": compExpr, "resource_type": rtypeExpr, "resource_name": rnameDisplayExpr,
 }
 var sorts = map[string]string{"cost": "cost", "resource_name": "resource_name", "service": "service", "compartment": "compartment"}
 var buckets = map[string]string{"hour": "toStartOfHour", "day": "toStartOfDay", "week": "toMonday", "month": "toStartOfMonth"}
@@ -27,10 +28,10 @@ func where(f Filters) (string, []any) {
 	args := []any{f.Start, f.End}
 	for _, item := range []struct{ column, value string }{
 		{envExpr, f.Environment}, {ccExpr, f.CostCenter}, {compExpr, f.ComponentType}, {"product_compartmentname", f.Compartment},
-		{"product_service", f.Service}, {rtypeExpr, f.ResourceType}, {rnameExpr, f.ResourceName}, {"product_resourceid", f.OCID},
+		{"product_service", f.Service}, {rtypeExpr, f.ResourceType}, {rnameDisplayExpr, f.ResourceName}, {"product_resourceid", f.OCID},
 	} {
 		// "__untagged__" selects rows where the dimension is empty; "" still means unfiltered
-		if item.value == "__untagged__" {
+		if item.value == "__untagged__" && item.column != rnameDisplayExpr {
 			parts = append(parts, item.column+" = ''")
 		} else if item.value != "" {
 			parts = append(parts, item.column+" = ?")
@@ -113,15 +114,13 @@ func ResourcesQuery(f Filters, p Page) (Query, error) {
 	}
 	w, a := where(f)
 	a = append(a, p.Limit, p.Offset)
-	name := fmt.Sprintf("if(empty(%s), concat('untagged · ', product_description), %s)", rnameExpr, rnameExpr)
-	return Query{fmt.Sprintf("SELECT product_resourceid ocid, any(%s) resource_name, any(product_service) service, any(product_compartmentname) compartment, any(product_region) region, any(%s) environment, any(%s) cost_center, any(%s) component_type, any(%s) resource_type, cost_currencycode currency, round(sum(cost_attributedcost), 2) cost, count() OVER () total FROM %s WHERE %s GROUP BY ocid, currency ORDER BY %s %s LIMIT ? OFFSET ?", name, envExpr, ccExpr, compExpr, rtypeExpr, SourceView, w, sort, direction), a}, nil
+	return Query{fmt.Sprintf("SELECT product_resourceid ocid, any(%s) resource_name, any(product_service) service, any(product_compartmentname) compartment, any(product_region) region, any(%s) environment, any(%s) cost_center, any(%s) component_type, any(%s) resource_type, cost_currencycode currency, round(sum(cost_attributedcost), 2) cost, count() OVER () total FROM %s WHERE %s GROUP BY ocid, currency ORDER BY %s %s LIMIT ? OFFSET ?", rnameDisplayExpr, envExpr, ccExpr, compExpr, rtypeExpr, SourceView, w, sort, direction), a}, nil
 }
 
 func ResourceQuery(f Filters, ocid string) Query {
 	f.OCID = ocid
 	w, a := where(f)
-	name := fmt.Sprintf("if(empty(%s), concat('untagged · ', product_description), %s)", rnameExpr, rnameExpr)
-	return Query{fmt.Sprintf("SELECT product_resourceid ocid, any(%s) resource_name, any(product_description) description, any(product_service) service, any(product_compartmentid) compartment_id, any(product_compartmentname) compartment, any(product_region) region, any(product_availabilitydomain) availability_domain, any(%s) environment, any(%s) cost_center, any(%s) component_type, any(%s) resource_type, cost_currencycode currency, round(sum(cost_attributedcost), 2) cost, min(lineitem_intervalusagestart) first_seen, max(lineitem_intervalusageend) last_seen FROM %s WHERE %s GROUP BY ocid, currency", name, envExpr, ccExpr, compExpr, rtypeExpr, SourceView, w), a}
+	return Query{fmt.Sprintf("SELECT product_resourceid ocid, any(%s) resource_name, any(product_description) description, any(product_service) service, any(product_compartmentid) compartment_id, any(product_compartmentname) compartment, any(product_region) region, any(product_availabilitydomain) availability_domain, any(%s) environment, any(%s) cost_center, any(%s) component_type, any(%s) resource_type, cost_currencycode currency, round(sum(cost_attributedcost), 2) cost, min(lineitem_intervalusagestart) first_seen, max(lineitem_intervalusageend) last_seen FROM %s WHERE %s GROUP BY ocid, currency", rnameDisplayExpr, envExpr, ccExpr, compExpr, rtypeExpr, SourceView, w), a}
 }
 
 // LineItemsRollupQuery buckets a resource's line items by day/week/month.
@@ -136,5 +135,5 @@ func LineItemsRollupQuery(f Filters, granularity string) (Query, error) {
 
 func FiltersQuery(f Filters) Query {
 	w, a := where(f)
-	return Query{fmt.Sprintf("SELECT groupUniqArray(1000)(%s) environments, groupUniqArray(1000)(%s) cost_centers, groupUniqArray(1000)(%s) component_types, groupUniqArray(1000)(product_compartmentname) compartments, groupUniqArray(1000)(product_service) services, groupUniqArray(1000)(%s) resource_types, groupUniqArray(1000)(%s) resource_names FROM %s WHERE %s", envExpr, ccExpr, compExpr, rtypeExpr, rnameExpr, SourceView, w), a}
+	return Query{fmt.Sprintf("SELECT groupUniqArray(1000)(%s) environments, groupUniqArray(1000)(%s) cost_centers, groupUniqArray(1000)(%s) component_types, groupUniqArray(1000)(product_compartmentname) compartments, groupUniqArray(1000)(product_service) services, groupUniqArray(1000)(%s) resource_types, groupUniqArray(1000)(%s) resource_names FROM %s WHERE %s", envExpr, ccExpr, compExpr, rtypeExpr, rnameDisplayExpr, SourceView, w), a}
 }

@@ -40,8 +40,39 @@ func TestResourceNameFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(query.SQL, "untagged · ") {
+	if !strings.Contains(query.SQL, rnameDisplayExpr) || !strings.Contains(query.SQL, "product_service") || !strings.Contains(query.SQL, "right(product_resourceid, 8)") {
 		t.Fatal("missing required resource-name fallback")
+	}
+}
+
+func TestResourceNameCompositeIsUsedForBreakdownFiltersAndOptions(t *testing.T) {
+	breakdown, err := BreakdownQuery(fixture(), "resource_name", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(breakdown.SQL, rnameDisplayExpr) {
+		t.Fatalf("breakdown must group on the display expression: %s", breakdown.SQL)
+	}
+
+	f := fixture()
+	f.ResourceName = "untagged · Compute · …12345678"
+	filtered := SummaryQuery(f)
+	if !strings.Contains(filtered.SQL, rnameDisplayExpr+" = ?") || filtered.Args[len(filtered.Args)-1] != f.ResourceName {
+		t.Fatalf("composite resource name must round-trip as a bound filter: %#v", filtered)
+	}
+
+	options := FiltersQuery(fixture())
+	if !strings.Contains(options.SQL, rnameDisplayExpr) {
+		t.Fatalf("filter options must use the display expression: %s", options.SQL)
+	}
+}
+
+func TestResourceNameDoesNotUseUntaggedSentinel(t *testing.T) {
+	f := fixture()
+	f.ResourceName = "__untagged__"
+	query := SummaryQuery(f)
+	if strings.Contains(query.SQL, rnameDisplayExpr+" = ''") || query.Args[len(query.Args)-1] != "__untagged__" {
+		t.Fatalf("resource-name sentinel must be a literal composite filter value: %#v", query)
 	}
 }
 

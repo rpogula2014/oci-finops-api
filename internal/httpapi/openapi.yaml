@@ -185,6 +185,7 @@ paths:
     get:
       tags: [costs]
       summary: Cost detail for a single resource OCID
+      description: Honors the shared date and dimension filters in addition to the required path OCID.
       parameters:
         - name: ocid
           in: path
@@ -192,6 +193,13 @@ paths:
           schema: {type: string, maxLength: 512}
         - $ref: "#/components/parameters/start"
         - $ref: "#/components/parameters/end"
+        - $ref: "#/components/parameters/env"
+        - $ref: "#/components/parameters/cost_center"
+        - $ref: "#/components/parameters/component_type"
+        - $ref: "#/components/parameters/compartment"
+        - $ref: "#/components/parameters/service"
+        - $ref: "#/components/parameters/resource_type"
+        - $ref: "#/components/parameters/resource_name"
       responses:
         "200":
           $ref: "#/components/responses/Ok"
@@ -317,7 +325,7 @@ components:
     resource_name:
       name: resource_name
       in: query
-      description: Use `__untagged__` to select blank values.
+      description: Canonical resource-name value. Blank name tags resolve to `untagged · <product_service> · …<OCID tail>`; `__untagged__` does not apply to this parameter.
       schema: {type: string}
   schemas:
     Envelope:
