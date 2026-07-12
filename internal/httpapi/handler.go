@@ -114,6 +114,7 @@ func (h *Handler) summary(w http.ResponseWriter, r *http.Request) {
 	}
 	h.run(w, r, cost.SummaryQuery(f), map[string]any{})
 }
+
 // execSummary aggregates everything the executive summary page needs into one
 // response; the per-section queries run concurrently in cost.Service.
 func (h *Handler) execSummary(w http.ResponseWriter, r *http.Request) {
@@ -179,12 +180,86 @@ func (h *Handler) breakdown(w http.ResponseWriter, r *http.Request) {
 		bad(w, fmt.Errorf("limit %w", err))
 		return
 	}
-	query, err := cost.BreakdownQuery(f, dimension, limit)
+	series, err := parseOptionalBool(r.URL.Query().Get("series"))
+	if err != nil {
+		bad(w, fmt.Errorf("series %w", err))
+		return
+	}
+	if !series {
+		query, err := cost.BreakdownQuery(f, dimension, limit)
+		if err != nil {
+			bad(w, err)
+			return
+		}
+		h.run(w, r, query, map[string]any{"dimension": dimension})
+		return
+	}
+	granularity := r.URL.Query().Get("granularity")
+	if granularity == "" {
+		granularity = "day"
+	}
+	query, err := cost.BreakdownSeriesQuery(f, dimension, limit, granularity)
 	if err != nil {
 		bad(w, err)
 		return
 	}
-	h.run(w, r, query, map[string]any{"dimension": dimension})
+	h.runBreakdownSeries(w, r, query, dimension, granularity)
+}
+
+func parseOptionalBool(raw string) (bool, error) {
+	if raw == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("must be true or false")
+	}
+	return value, nil
+}
+
+// runBreakdownSeries folds the joined result set into the public row shape.
+// The costs are strings in this response so decimal precision is not lost in
+// JavaScript before the UI chooses how to display them.
+func (h *Handler) runBreakdownSeries(w http.ResponseWriter, r *http.Request, query cost.Query, dimension, granularity string) {
+	ctx, cancel := h.withTimeout(r)
+	defer cancel()
+	result, fresh, err := h.service.Run(ctx, query)
+	if err != nil {
+		slog.Error("clickhouse breakdown series query failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "UPSTREAM_ERROR", "cost data is unavailable")
+		return
+	}
+	type groupedRow struct {
+		row    map[string]any
+		series []map[string]any
+	}
+	grouped := make(map[string]*groupedRow, len(result.Rows))
+	ordered := make([]*groupedRow, 0, len(result.Rows))
+	for _, source := range result.Rows {
+		value, _ := source["dimension_value"].(string)
+		currency, _ := source["currency"].(string)
+		key := value + "\x00" + currency
+		entry := grouped[key]
+		if entry == nil {
+			entry = &groupedRow{row: map[string]any{
+				"dimension_value": source["dimension_value"],
+				"currency":        source["currency"],
+				"cost":            source["cost"],
+				"resources":       source["resources"],
+			}}
+			grouped[key] = entry
+			ordered = append(ordered, entry)
+		}
+		if date, ok := source["date"].(string); ok && date != "" {
+			entry.series = append(entry.series, map[string]any{"date": date, "cost": source["series_cost"]})
+		}
+	}
+	data := make([]map[string]any, 0, len(ordered))
+	for _, entry := range ordered {
+		entry.row["series"] = entry.series
+		data = append(data, entry.row)
+	}
+	writeJSON(w, http.StatusOK, envelope{Data: data, Meta: map[string]any{"dimension": dimension, "granularity": granularity, "freshness": fresh}})
 }
 func (h *Handler) resources(w http.ResponseWriter, r *http.Request) {
 	f, err := h.parseFilters(r)
@@ -235,11 +310,6 @@ func (h *Handler) lineItems(w http.ResponseWriter, r *http.Request) {
 	f, err := h.parseFilters(r)
 	if err != nil {
 		bad(w, err)
-		return
-	}
-	// line items must be narrowed to one resource by OCID or name
-	if f.OCID == "" && f.ResourceName == "" {
-		bad(w, fmt.Errorf("ocid or resource_name is required"))
 		return
 	}
 	granularity := r.URL.Query().Get("granularity")

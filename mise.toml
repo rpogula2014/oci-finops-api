@@ -1,0 +1,14 @@
+[tools]
+go = "1.25"
+
+[env]
+_.file = ".env"
+
+[tasks.install]
+run = "go mod download"
+
+[tasks.api]
+run = "go run -tags clickhouse ./cmd/cost-api"
+
+[tasks.test]
+run = "go test ./..."

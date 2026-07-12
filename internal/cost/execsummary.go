@@ -3,7 +3,6 @@ package cost
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 )
 
@@ -35,50 +34,48 @@ func ValidDimension(dimension string) bool {
 	return ok
 }
 
-// withDimensionFilter narrows filters to one dimension value, mirroring the
-// UI's per-series filter; "" means untagged and maps to the API sentinel.
-func withDimensionFilter(f Filters, dimension, value string) (Filters, error) {
-	if value == "" {
-		value = "__untagged__"
-	}
-	switch dimension {
-	case "service":
-		f.Service = value
-	case "compartment":
-		f.Compartment = value
-	case "environment":
-		f.Environment = value
-	case "cost_center":
-		f.CostCenter = value
-	case "component_type":
-		f.ComponentType = value
-	case "resource_type":
-		f.ResourceType = value
-	case "resource_name":
-		f.ResourceName = value
-	default:
-		return f, fmt.Errorf("unsupported dimension")
-	}
-	return f, nil
-}
-
-// topNames returns up to n distinct dimension values in cost-desc order
-// (breakdown rows may repeat a value across currencies).
-func topNames(rows []map[string]any, n int) []string {
-	seen := make(map[string]bool, n)
-	names := make([]string, 0, n)
-	for _, row := range rows {
-		name, ok := row["dimension_value"].(string)
-		if !ok || seen[name] {
-			continue
+// splitTopSeries reshapes the combined breakdown-series rows (from
+// BreakdownSeriesQuery) into the two output sections in one pass:
+//   - breakdown: one row per (dimension_value, currency), cost-desc order
+//   - series: one NamedSeries per distinct name (currencies collapse into
+//     one series), capped at top, with rows shaped like TimeseriesQuery
+//     output ({bucket, currency, cost}) to preserve the wire contract.
+func splitTopSeries(rows []map[string]any, top int) ([]map[string]any, []NamedSeries) {
+	seenBreakdown := make(map[string]bool, len(rows))
+	breakdown := make([]map[string]any, 0, len(rows))
+	seriesIdx := make(map[string]int, len(rows))
+	var series []NamedSeries
+	for _, src := range rows {
+		value, _ := src["dimension_value"].(string)
+		currency, _ := src["currency"].(string)
+		if key := value + "\x00" + currency; !seenBreakdown[key] {
+			seenBreakdown[key] = true
+			breakdown = append(breakdown, map[string]any{
+				"dimension_value": src["dimension_value"],
+				"currency":        src["currency"],
+				"cost":            src["cost"],
+				"resources":       src["resources"],
+			})
 		}
-		seen[name] = true
-		names = append(names, name)
-		if len(names) == n {
-			break
+		idx, ok := seriesIdx[value]
+		if !ok {
+			idx = len(series)
+			seriesIdx[value] = idx
+			series = append(series, NamedSeries{Name: value, Rows: []map[string]any{}})
+		}
+		// LEFT JOIN emits a null date for names with no matching series bucket.
+		if date, ok := src["date"].(string); ok && date != "" {
+			series[idx].Rows = append(series[idx].Rows, map[string]any{
+				"bucket":   date,
+				"currency": src["currency"],
+				"cost":     src["series_cost"],
+			})
 		}
 	}
-	return names
+	if top >= 0 && len(series) > top {
+		series = series[:top]
+	}
+	return orEmpty(breakdown), series
 }
 
 func orEmpty(rows []map[string]any) []map[string]any {
@@ -93,7 +90,10 @@ func (s *Service) ExecSummary(ctx context.Context, p ExecSummaryParams) (ExecSum
 	if err != nil {
 		return ExecSummary{}, err
 	}
-	topQ, err := BreakdownQuery(p.Filters, p.Dimension, 20)
+	// One query returns the top-20 breakdown and each name's monthly series,
+	// replacing the old N+1 fan-out (1 breakdown query + one TimeseriesQuery
+	// per top name) and its second serial round trip to ClickHouse.
+	topSeriesQ, err := BreakdownSeriesQuery(p.Filters, p.Dimension, 20, "month")
 	if err != nil {
 		return ExecSummary{}, err
 	}
@@ -107,6 +107,7 @@ func (s *Service) ExecSummary(ctx context.Context, p ExecSummaryParams) (ExecSum
 	}
 
 	var out ExecSummary
+	var topSeriesRows []map[string]any
 	jobs := []struct {
 		dst *[]map[string]any
 		q   Query
@@ -115,7 +116,7 @@ func (s *Service) ExecSummary(ctx context.Context, p ExecSummaryParams) (ExecSum
 		{&out.Monthly, monthlyQ},
 		{&out.CostCenters, ccQ},
 		{&out.Environments, envQ},
-		{&out.TopBreakdown, topQ},
+		{&topSeriesRows, topSeriesQ},
 	}
 	var wg sync.WaitGroup
 	errs := make([]error, len(jobs))
@@ -144,34 +145,6 @@ func (s *Service) ExecSummary(ctx context.Context, p ExecSummaryParams) (ExecSum
 		return ExecSummary{}, err
 	}
 
-	names := topNames(out.TopBreakdown, p.Top)
-	out.TopSeries = make([]NamedSeries, len(names))
-	serErrs := make([]error, len(names))
-	for i, name := range names {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			f, err := withDimensionFilter(p.Filters, p.Dimension, name)
-			if err != nil {
-				serErrs[i] = err
-				return
-			}
-			q, err := TimeseriesQuery(f, "month")
-			if err != nil {
-				serErrs[i] = err
-				return
-			}
-			result, err := s.repo.Execute(ctx, q)
-			if err != nil {
-				serErrs[i] = err
-				return
-			}
-			out.TopSeries[i] = NamedSeries{Name: name, Rows: orEmpty(result.Rows)}
-		}()
-	}
-	wg.Wait()
-	if err := errors.Join(serErrs...); err != nil {
-		return ExecSummary{}, err
-	}
+	out.TopBreakdown, out.TopSeries = splitTopSeries(topSeriesRows, p.Top)
 	return out, nil
 }

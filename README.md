@@ -28,11 +28,11 @@ When `rname` is blank, resource responses use `untagged · product_description`.
 - `GET /v1/costs/summary`
 - `GET /v1/costs/exec-summary?dimension=cost_center&top=7` — aggregate payload for the executive summary page in one round trip: `data` object with `summary`, `monthly`, `cost_centers`, `environments`, `top_breakdown` (limit 20), `top_series` (one monthly series per top-N `dimension` value, `top` 1–20 default 7), and `freshness` (best-effort, `null` if the freshness query fails). Sub-queries run concurrently server-side; accepts all shared filters.
 - `GET /v1/costs/timeseries?granularity=hour|day|month`
-- `GET /v1/costs/breakdown?dimension=service|compartment|environment|cost_center|component_type|resource_type|resource_name`
+- `GET /v1/costs/breakdown?dimension=service|compartment|environment|cost_center|component_type|resource_type|resource_name&series=true&granularity=day` — `series=true` adds each row's `{date, cost}` series at the selected granularity. In series mode the row `cost` and every series `cost` are decimal strings (never floats — parse only at display); the default mode keeps the numeric `cost` unchanged.
 - `GET /v1/costs/resources?page=1&limit=50&sort=cost&direction=desc`
 - `GET /v1/costs/resources/{ocid}`
-- `GET /v1/costs/lineitems?resource_name=X&granularity=day|week|month` (or `ocid=X`) — bucketed cost detail by resource name or OCID; one of the two is required, granularity defaults to day
-- `GET /v1/costs/filters`
+- `GET /v1/costs/lineitems?resource_name=X&granularity=day|week|month` (or `ocid=X`) — bucketed cost detail under shared filters; resource name and OCID are optional narrowers, and granularity defaults to day
+- `GET /v1/costs/filters` — accepts the shared filters and returns only values valid under them, enabling cascading filter controls.
 - `GET /v1/costs/freshness`
 - `GET /openapi.yaml` — embedded OpenAPI 3.0 spec
 - `GET /docs` — Swagger UI (assets pinned to swagger-ui-dist@5.17.14 via CDN with SRI)
@@ -41,7 +41,7 @@ When `rname` is blank, resource responses use `untagged · product_description`.
 
 Structured JSON via `log/slog` on stdout. `LOG_LEVEL` env: debug|info|warn|error (default info). Every request is logged with method, path, status, duration_ms, and request_id.
 
-Shared filters: `start`, `end`, `env`, `cost_center`, `component_type`, `compartment`, `service`, `resource_type`, `resource_name`, and `ocid`. Timestamps are RFC3339. The default range is one month, the maximum is 400 days, breakdowns are limited to 100 rows, and resource pages to 500 rows.
+Shared filters: `start`, `end`, `env`, `cost_center`, `component_type`, `compartment`, `service`, `resource_type`, `resource_name`, and `ocid`. Pass `__untagged__` for any dimension filter to select its blank values. Timestamps are RFC3339. The default range is one month, the maximum is 400 days, breakdowns are limited to 100 rows, and resource pages to 500 rows.
 
 All values are bound with ClickHouse placeholders. The only interpolated SQL fragments are service-owned allowlisted dimensions, sort columns/directions, and time buckets. Cost is always `cost_attributedcost` from the reconciled attributed view. Currency remains a grouping dimension so unlike currencies are never silently summed together.
 

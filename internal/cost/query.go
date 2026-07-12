@@ -64,6 +64,44 @@ func BreakdownQuery(f Filters, dimension string, limit int) (Query, error) {
 	return Query{fmt.Sprintf("SELECT %s dimension_value, cost_currencycode currency, round(sum(cost_attributedcost), 2) cost, uniqExact(product_resourceid) resources FROM %s WHERE %s GROUP BY dimension_value, currency ORDER BY cost DESC LIMIT ?", column, SourceView, w), a}, nil
 }
 
+// BreakdownSeriesQuery returns the same top-level breakdown rows along with a
+// time series for each row. It keeps the aggregation in one ClickHouse query,
+// rather than requiring the client to make one timeseries request per row.
+func BreakdownSeriesQuery(f Filters, dimension string, limit int, granularity string) (Query, error) {
+	column, ok := dimensions[dimension]
+	if !ok {
+		return Query{}, fmt.Errorf("unsupported dimension")
+	}
+	bucket, ok := buckets[granularity]
+	if !ok {
+		return Query{}, fmt.Errorf("unsupported granularity")
+	}
+	w, a := where(f)
+	seriesWhere, seriesArgs := where(f)
+	args := append(append(a, limit), seriesArgs...)
+	return Query{fmt.Sprintf(`WITH b AS (
+  SELECT %[1]s dimension_value, cost_currencycode currency,
+         toString(round(sum(cost_attributedcost), 2)) cost,
+         uniqExact(product_resourceid) resources,
+         sum(cost_attributedcost) sort_cost
+  FROM %[2]s WHERE %[3]s
+  GROUP BY dimension_value, currency
+  ORDER BY sort_cost DESC
+  LIMIT ?
+)
+SELECT b.dimension_value, b.currency, b.cost, b.resources, s.date, s.series_cost
+FROM b
+LEFT JOIN (
+  SELECT %[1]s dimension_value, cost_currencycode currency,
+         formatDateTime(%[4]s(lineitem_intervalusagestart), '%%FT%%TZ') date,
+         toString(round(sum(cost_attributedcost), 2)) series_cost
+  FROM %[2]s WHERE %[5]s
+    AND (%[1]s, cost_currencycode) IN (SELECT dimension_value, currency FROM b)
+  GROUP BY dimension_value, currency, date
+) s ON b.dimension_value = s.dimension_value AND b.currency = s.currency
+ORDER BY b.sort_cost DESC, s.date`, column, SourceView, w, bucket, seriesWhere), args}, nil
+}
+
 func ResourcesQuery(f Filters, p Page) (Query, error) {
 	sort, ok := sorts[p.Sort]
 	if !ok {

@@ -44,3 +44,39 @@ func TestResourceNameFallback(t *testing.T) {
 		t.Fatal("missing required resource-name fallback")
 	}
 }
+
+func TestBreakdownSeriesQueryUsesOneBoundQuery(t *testing.T) {
+	query, err := BreakdownSeriesQuery(fixture(), "service", 15, "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(query.SQL, "series_cost") || !strings.Contains(query.SQL, "formatDateTime") || !strings.Contains(query.SQL, "IN (SELECT dimension_value, currency FROM b)") {
+		t.Fatalf("missing series projection: %s", query.SQL)
+	}
+	if len(query.Args) != 7 { // date range + filter, limit, then date range + filter again
+		t.Fatalf("args=%v", query.Args)
+	}
+	if query.Args[2] != fixture().Service || query.Args[3] != 15 || query.Args[6] != fixture().Service {
+		t.Fatalf("unexpected argument order: %#v", query.Args)
+	}
+	if _, err := BreakdownSeriesQuery(fixture(), "service", 15, "minute"); err == nil {
+		t.Fatal("expected granularity rejection")
+	}
+}
+
+func TestUntaggedFiltersUseEmptyComparisonWithoutBindingSentinel(t *testing.T) {
+	f := fixture()
+	f.Service = "__untagged__"
+	query, err := BreakdownSeriesQuery(f, "service", 15, "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(query.SQL, "product_service = ''") {
+		t.Fatalf("untagged comparison missing: %s", query.SQL)
+	}
+	for _, arg := range query.Args {
+		if arg == "__untagged__" {
+			t.Fatalf("sentinel must not be bound: %#v", query.Args)
+		}
+	}
+}

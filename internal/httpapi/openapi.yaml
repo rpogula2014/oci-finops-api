@@ -120,6 +120,11 @@ paths:
         - name: limit
           in: query
           schema: {type: integer, default: 20, minimum: 1, maximum: 100}
+        - name: series
+          in: query
+          description: Include a cost series for each returned row. Defaults to false.
+          schema: {type: boolean, default: false}
+        - $ref: "#/components/parameters/granularity"
         - $ref: "#/components/parameters/start"
         - $ref: "#/components/parameters/end"
         - $ref: "#/components/parameters/env"
@@ -131,7 +136,11 @@ paths:
         - $ref: "#/components/parameters/resource_name"
       responses:
         "200":
-          $ref: "#/components/responses/Ok"
+          description: Breakdown envelope. `series` is omitted unless `series=true`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BreakdownEnvelope"
         "400":
           $ref: "#/components/responses/Validation"
         "503":
@@ -193,7 +202,7 @@ paths:
   /v1/costs/lineitems:
     get:
       tags: [costs]
-      summary: Bucketed cost detail by resource_name or ocid (one required)
+      summary: Bucketed cost detail under the supplied shared filters (resource_name or ocid optionally narrow to one resource)
       parameters:
         - name: resource_name
           in: query
@@ -204,6 +213,12 @@ paths:
         - $ref: "#/components/parameters/lineitem_granularity"
         - $ref: "#/components/parameters/start"
         - $ref: "#/components/parameters/end"
+        - $ref: "#/components/parameters/env"
+        - $ref: "#/components/parameters/cost_center"
+        - $ref: "#/components/parameters/component_type"
+        - $ref: "#/components/parameters/compartment"
+        - $ref: "#/components/parameters/service"
+        - $ref: "#/components/parameters/resource_type"
       responses:
         "200":
           $ref: "#/components/responses/Ok"
@@ -218,6 +233,13 @@ paths:
       parameters:
         - $ref: "#/components/parameters/start"
         - $ref: "#/components/parameters/end"
+        - $ref: "#/components/parameters/env"
+        - $ref: "#/components/parameters/cost_center"
+        - $ref: "#/components/parameters/component_type"
+        - $ref: "#/components/parameters/compartment"
+        - $ref: "#/components/parameters/service"
+        - $ref: "#/components/parameters/resource_type"
+        - $ref: "#/components/parameters/resource_name"
       responses:
         "200":
           $ref: "#/components/responses/Ok"
@@ -236,6 +258,14 @@ paths:
           $ref: "#/components/responses/Unavailable"
 components:
   parameters:
+    granularity:
+      name: granularity
+      in: query
+      description: Bucket size for an optional breakdown series
+      schema:
+        type: string
+        enum: [hour, day, week, month]
+        default: day
     lineitem_granularity:
       name: granularity
       in: query
@@ -257,30 +287,37 @@ components:
     env:
       name: env
       in: query
+      description: Use `__untagged__` to select blank values.
       schema: {type: string}
     cost_center:
       name: cost_center
       in: query
+      description: Use `__untagged__` to select blank values.
       schema: {type: string}
     component_type:
       name: component_type
       in: query
+      description: Use `__untagged__` to select blank values.
       schema: {type: string}
     compartment:
       name: compartment
       in: query
+      description: Use `__untagged__` to select blank values.
       schema: {type: string}
     service:
       name: service
       in: query
+      description: Use `__untagged__` to select blank values.
       schema: {type: string}
     resource_type:
       name: resource_type
       in: query
+      description: Use `__untagged__` to select blank values.
       schema: {type: string}
     resource_name:
       name: resource_name
       in: query
+      description: Use `__untagged__` to select blank values.
       schema: {type: string}
   schemas:
     Envelope:
@@ -297,6 +334,40 @@ components:
           properties:
             code: {type: string}
             message: {type: string}
+    BreakdownEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                type: object
+                required: [dimension_value, currency, cost, resources]
+                properties:
+                  dimension_value: {type: string}
+                  currency: {type: string}
+                  cost:
+                    oneOf:
+                      - type: number
+                        format: double
+                      - type: string
+                    description: >-
+                      Number in the default mode; decimal string (e.g. "39957.95")
+                      when `series=true` — series-mode costs are decimal strings to
+                      avoid float precision loss, parse only at display.
+                  resources: {type: integer}
+                  series:
+                    type: array
+                    description: Present only when `series=true`.
+                    items:
+                      type: object
+                      required: [date, cost]
+                      properties:
+                        date: {type: string, format: date-time}
+                        cost:
+                          type: string
+                          description: Decimal string, never a float.
   responses:
     Ok:
       description: Success envelope; rows in `data`, freshness/pagination in `meta`
