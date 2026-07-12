@@ -1,0 +1,318 @@
+openapi: 3.0.3
+info:
+  title: CostScope Cost API
+  description: Read-only API over ClickHouse view `oci_cost_report_attributed`.
+  version: 1.0.0
+servers:
+  - url: /
+tags:
+  - name: costs
+  - name: ops
+paths:
+  /healthz:
+    get:
+      tags: [ops]
+      summary: Health check (pings ClickHouse)
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/costs/summary:
+    get:
+      tags: [costs]
+      summary: Total cost summary for the filtered window
+      parameters:
+        - $ref: "#/components/parameters/start"
+        - $ref: "#/components/parameters/end"
+        - $ref: "#/components/parameters/env"
+        - $ref: "#/components/parameters/cost_center"
+        - $ref: "#/components/parameters/component_type"
+        - $ref: "#/components/parameters/compartment"
+        - $ref: "#/components/parameters/service"
+        - $ref: "#/components/parameters/resource_type"
+        - $ref: "#/components/parameters/resource_name"
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/Validation"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/costs/exec-summary:
+    get:
+      tags: [costs]
+      summary: Aggregate payload for the executive summary page (one round trip)
+      description: >
+        Returns summary totals, monthly timeseries, cost-center and environment
+        breakdowns, top-N breakdown for `dimension`, a monthly series per top-N
+        dimension value, and freshness (best-effort, null on failure) in one
+        `data` object. Sub-queries run concurrently server-side.
+      parameters:
+        - name: dimension
+          in: query
+          schema:
+            type: string
+            enum: [service, compartment, environment, cost_center, component_type, resource_type, resource_name]
+            default: cost_center
+        - name: top
+          in: query
+          description: Number of per-value monthly series to return
+          schema: {type: integer, default: 7, minimum: 1, maximum: 20}
+        - $ref: "#/components/parameters/start"
+        - $ref: "#/components/parameters/end"
+        - $ref: "#/components/parameters/env"
+        - $ref: "#/components/parameters/cost_center"
+        - $ref: "#/components/parameters/component_type"
+        - $ref: "#/components/parameters/compartment"
+        - $ref: "#/components/parameters/service"
+        - $ref: "#/components/parameters/resource_type"
+        - $ref: "#/components/parameters/resource_name"
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/Validation"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/costs/timeseries:
+    get:
+      tags: [costs]
+      summary: Cost over time
+      parameters:
+        - name: granularity
+          in: query
+          schema:
+            type: string
+            enum: [hour, day, week, month]
+            default: day
+        - $ref: "#/components/parameters/start"
+        - $ref: "#/components/parameters/end"
+        - $ref: "#/components/parameters/env"
+        - $ref: "#/components/parameters/cost_center"
+        - $ref: "#/components/parameters/component_type"
+        - $ref: "#/components/parameters/compartment"
+        - $ref: "#/components/parameters/service"
+        - $ref: "#/components/parameters/resource_type"
+        - $ref: "#/components/parameters/resource_name"
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/Validation"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/costs/breakdown:
+    get:
+      tags: [costs]
+      summary: Cost grouped by one dimension
+      parameters:
+        - name: dimension
+          in: query
+          schema:
+            type: string
+            enum: [service, compartment, environment, cost_center, component_type, resource_type, resource_name]
+            default: service
+        - name: limit
+          in: query
+          schema: {type: integer, default: 20, minimum: 1, maximum: 100}
+        - $ref: "#/components/parameters/start"
+        - $ref: "#/components/parameters/end"
+        - $ref: "#/components/parameters/env"
+        - $ref: "#/components/parameters/cost_center"
+        - $ref: "#/components/parameters/component_type"
+        - $ref: "#/components/parameters/compartment"
+        - $ref: "#/components/parameters/service"
+        - $ref: "#/components/parameters/resource_type"
+        - $ref: "#/components/parameters/resource_name"
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/Validation"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/costs/resources:
+    get:
+      tags: [costs]
+      summary: Paginated per-resource costs
+      parameters:
+        - name: page
+          in: query
+          schema: {type: integer, default: 1, minimum: 1, maximum: 100000}
+        - name: limit
+          in: query
+          schema: {type: integer, default: 50, minimum: 1, maximum: 500}
+        - name: sort
+          in: query
+          schema: {type: string, default: cost}
+        - name: direction
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - $ref: "#/components/parameters/start"
+        - $ref: "#/components/parameters/end"
+        - $ref: "#/components/parameters/env"
+        - $ref: "#/components/parameters/cost_center"
+        - $ref: "#/components/parameters/component_type"
+        - $ref: "#/components/parameters/compartment"
+        - $ref: "#/components/parameters/service"
+        - $ref: "#/components/parameters/resource_type"
+        - $ref: "#/components/parameters/resource_name"
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/Validation"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/costs/resources/{ocid}:
+    get:
+      tags: [costs]
+      summary: Cost detail for a single resource OCID
+      parameters:
+        - name: ocid
+          in: path
+          required: true
+          schema: {type: string, maxLength: 512}
+        - $ref: "#/components/parameters/start"
+        - $ref: "#/components/parameters/end"
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/Validation"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/costs/lineitems:
+    get:
+      tags: [costs]
+      summary: Bucketed cost detail by resource_name or ocid (one required)
+      parameters:
+        - name: resource_name
+          in: query
+          schema: {type: string}
+        - name: ocid
+          in: query
+          schema: {type: string, maxLength: 512}
+        - $ref: "#/components/parameters/lineitem_granularity"
+        - $ref: "#/components/parameters/start"
+        - $ref: "#/components/parameters/end"
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/Validation"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/costs/filters:
+    get:
+      tags: [costs]
+      summary: Distinct filter values for the current window
+      parameters:
+        - $ref: "#/components/parameters/start"
+        - $ref: "#/components/parameters/end"
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/Validation"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/costs/freshness:
+    get:
+      tags: [ops]
+      summary: Latest data timestamp in the source view
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+components:
+  parameters:
+    lineitem_granularity:
+      name: granularity
+      in: query
+      description: Bucket size for the rollup rows (cost, my_cost, line_items, overage_items per bucket)
+      schema:
+        type: string
+        enum: [day, week, month]
+        default: day
+    start:
+      name: start
+      in: query
+      description: RFC3339 window start (default now-1 month)
+      schema: {type: string, format: date-time}
+    end:
+      name: end
+      in: query
+      description: RFC3339 window end (default now); range max 400 days
+      schema: {type: string, format: date-time}
+    env:
+      name: env
+      in: query
+      schema: {type: string}
+    cost_center:
+      name: cost_center
+      in: query
+      schema: {type: string}
+    component_type:
+      name: component_type
+      in: query
+      schema: {type: string}
+    compartment:
+      name: compartment
+      in: query
+      schema: {type: string}
+    service:
+      name: service
+      in: query
+      schema: {type: string}
+    resource_type:
+      name: resource_type
+      in: query
+      schema: {type: string}
+    resource_name:
+      name: resource_name
+      in: query
+      schema: {type: string}
+  schemas:
+    Envelope:
+      type: object
+      properties:
+        data:
+          nullable: true
+        meta:
+          type: object
+          additionalProperties: true
+        error:
+          nullable: true
+          type: object
+          properties:
+            code: {type: string}
+            message: {type: string}
+  responses:
+    Ok:
+      description: Success envelope; rows in `data`, freshness/pagination in `meta`
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Envelope"
+    Validation:
+      description: Invalid parameters (`error.code = VALIDATION_ERROR`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Envelope"
+    Unavailable:
+      description: ClickHouse unavailable (`error.code = UPSTREAM_ERROR` or `UNHEALTHY`)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Envelope"
