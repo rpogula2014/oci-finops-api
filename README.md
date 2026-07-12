@@ -30,6 +30,7 @@ When `rname` is blank, every resource-name API value uses the composite `untagge
 - `GET /v1/costs/timeseries?granularity=hour|day|month`
 - `GET /v1/costs/breakdown?dimension=service|compartment|environment|cost_center|component_type|resource_type|resource_name&series=true&granularity=day` — `series=true` adds each row's `{date, cost}` series at the selected granularity. In series mode the row `cost` and every series `cost` are decimal strings (never floats — parse only at display); the default mode keeps the numeric `cost` unchanged.
 - `GET /v1/costs/resources?page=1&limit=50&sort=cost&direction=desc`
+- `GET /v1/costs/resources/grouped?group1=environment&group2=cost_center&grain=month` -- grouped USD-only resource-month rows for the direct Resources view; use `group1_value` and `group2_value` to expand a parent, and `q` for server-side case-insensitive text search
 - `GET /v1/costs/resources/{ocid}` — accepts the shared date and dimension filters in addition to the path OCID, so detail cost stays scoped to the originating Resources view
 - `GET /v1/costs/lineitems?resource_name=X&granularity=day|week|month` (or `ocid=X`) — bucketed cost detail under shared filters; resource name and OCID are optional narrowers, and granularity defaults to day
 - `GET /v1/costs/filters` — accepts the shared filters and returns only values valid under them, enabling cascading filter controls.
@@ -53,6 +54,50 @@ Success and error responses share an envelope:
 
 ```json
 {"data":null,"meta":{},"error":{"code":"VALIDATION_ERROR","message":"..."}}
+```
+
+## Grouped resources endpoint
+
+`GET /v1/costs/resources/grouped` is additive; it leaves the paginated
+`/v1/costs/resources` endpoint unchanged. It accepts the shared filter and date
+scope, plus these query parameters:
+
+| Parameter | Required | Purpose |
+|---|---:|---|
+| `group1` | yes | `service`, `compartment`, `environment`, `cost_center`, `component_type`, `resource_type`, `resource_name`, or `period` |
+| `group2` | no | A different grouping dimension for a second expandable level |
+| `group1_value` | no | First parent value for expansion; `__untagged__` scopes blank tag values |
+| `group2_value` | no | Second parent value; requires `group1_value` and `group2` |
+| `q` | no | Case-insensitive substring across resource name, OCID, service, compartment, region, type, and tags |
+| `hide_zero` | no | When `true`, drops groups/leaves whose rounded cost is $0 ("hide noise") |
+| `grain` | no | Must be `month`; resource leaves are resource-month rows |
+
+The query always filters the physical `cost_currencycode` column to USD before
+aggregation. Group and `other` rows contain `kind`, `depth`, `group_value`,
+`currency`, `subtotal_cost`, and `row_count`; `other` is terminal and represents
+the aggregate of children after the top 15. Leaf rows have `kind: "leaf"` and
+include period, tag, resource, OCID, currency, and decimal-string cost fields.
+
+Example request:
+
+```http
+GET /v1/costs/resources/grouped?group1=environment&group2=cost_center&group1_value=dev&q=payments&grain=month
+```
+
+Example response:
+
+```json
+{"data":[{"kind":"group","depth":1,"group_value":"platform","currency":"USD","subtotal_cost":"24.50","row_count":3}],"meta":{"freshness":{"data_through":"...","loaded_at":"..."}},"error":null}
+```
+
+```mermaid
+flowchart LR
+  Client --> Handler["groupedResources handler"]
+  Handler --> Validate["validate group dimensions and grain"]
+  Validate --> Query["bound ClickHouse grouped query"]
+  Query --> View["oci_cost_report_attributed"]
+  View --> Shape["group / other / leaf envelope rows"]
+  Shape --> Client
 ```
 
 ## Run locally

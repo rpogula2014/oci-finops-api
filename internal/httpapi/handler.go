@@ -29,6 +29,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/costs/exec-summary", h.execSummary)
 	mux.HandleFunc("GET /v1/costs/timeseries", h.timeseries)
 	mux.HandleFunc("GET /v1/costs/breakdown", h.breakdown)
+	mux.HandleFunc("GET /v1/costs/resources/grouped", h.groupedResources)
 	mux.HandleFunc("GET /v1/costs/resources", h.resources)
 	mux.HandleFunc("GET /v1/costs/resources/{ocid}", h.resource)
 	mux.HandleFunc("GET /v1/costs/lineitems", h.lineItems)
@@ -292,6 +293,70 @@ func (h *Handler) resources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.run(w, r, query, map[string]any{"page": page, "limit": limit})
+}
+
+func (h *Handler) groupedResources(w http.ResponseWriter, r *http.Request) {
+	f, err := h.parseFilters(r)
+	if err != nil {
+		bad(w, err)
+		return
+	}
+	q := r.URL.Query()
+	group1 := q.Get("group1")
+	group2 := q.Get("group2")
+	if !cost.ValidGroupedResourceDimension(group1) {
+		bad(w, fmt.Errorf("unsupported group1"))
+		return
+	}
+	if group2 != "" && !cost.ValidGroupedResourceDimension(group2) {
+		bad(w, fmt.Errorf("unsupported group2"))
+		return
+	}
+	if group1 == group2 && group2 != "" {
+		bad(w, fmt.Errorf("group1 and group2 must differ"))
+		return
+	}
+	if q.Get("group2_value") != "" && (group2 == "" || q.Get("group1_value") == "") {
+		bad(w, fmt.Errorf("group2_value requires group1_value and group2"))
+		return
+	}
+	if grain := q.Get("grain"); grain != "" && grain != "month" {
+		bad(w, fmt.Errorf("grain must be month"))
+		return
+	}
+	query, err := cost.GroupedResourcesQuery(f, group1, group2, q.Get("group1_value"), q.Get("group2_value"), q.Get("q"), q.Get("hide_zero") == "true")
+	if err != nil {
+		bad(w, err)
+		return
+	}
+	ctx, cancel := h.withTimeout(r)
+	defer cancel()
+	result, fresh, err := h.service.Run(ctx, query)
+	if err != nil {
+		slog.Error("clickhouse grouped resources query failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "UPSTREAM_ERROR", "cost data is unavailable")
+		return
+	}
+	rows := make([]map[string]any, 0, len(result.Rows))
+	for _, row := range result.Rows {
+		rows = append(rows, groupedResourceRow(row))
+	}
+	writeJSON(w, http.StatusOK, envelope{Data: rows, Meta: map[string]any{"freshness": fresh}})
+}
+
+func groupedResourceRow(source map[string]any) map[string]any {
+	kind, _ := source["kind"].(string)
+	keys := []string{"kind", "depth", "group_value", "currency", "subtotal_cost", "row_count"}
+	if kind == "leaf" {
+		keys = []string{"kind", "period", "environment", "cost_center", "component_type", "compartment", "service", "resource_type", "resource_name", "ocid", "currency", "cost"}
+	}
+	row := make(map[string]any, len(keys))
+	for _, key := range keys {
+		if value, ok := source[key]; ok {
+			row[key] = value
+		}
+	}
+	return row
 }
 func (h *Handler) resource(w http.ResponseWriter, r *http.Request) {
 	f, err := h.parseFilters(r)

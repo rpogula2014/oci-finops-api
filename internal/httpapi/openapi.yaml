@@ -181,6 +181,66 @@ paths:
           $ref: "#/components/responses/Validation"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/costs/resources/grouped:
+    get:
+      tags: [costs]
+      summary: Lazily expandable grouped resource-month costs
+      description: >
+        Groups a USD-only resource-month dataset. `group1_value` and `group2_value`
+        scope lazy expansion; `q` is a case-insensitive resource-text search applied
+        before grouping. A synthetic `other` row represents children past the top-15 cap.
+      parameters:
+        - name: group1
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [service, compartment, environment, cost_center, component_type, resource_type, resource_name, period]
+        - name: group2
+          in: query
+          schema:
+            type: string
+            enum: [service, compartment, environment, cost_center, component_type, resource_type, resource_name, period]
+        - name: group1_value
+          in: query
+          description: Parent group value; use `__untagged__` for blank tag dimensions.
+          schema: {type: string}
+        - name: group2_value
+          in: query
+          description: Second parent group value; requires `group1_value` and `group2`.
+          schema: {type: string}
+        - name: q
+          in: query
+          description: Case-insensitive substring search across resource text columns.
+          schema: {type: string}
+        - name: hide_zero
+          in: query
+          description: When true, drops groups/leaves whose rounded cost is $0 ("hide noise").
+          schema: {type: boolean, default: false}
+        - name: grain
+          in: query
+          description: Required leaf grain; only month is supported.
+          schema: {type: string, enum: [month], default: month}
+        - $ref: "#/components/parameters/start"
+        - $ref: "#/components/parameters/end"
+        - $ref: "#/components/parameters/env"
+        - $ref: "#/components/parameters/cost_center"
+        - $ref: "#/components/parameters/component_type"
+        - $ref: "#/components/parameters/compartment"
+        - $ref: "#/components/parameters/service"
+        - $ref: "#/components/parameters/resource_type"
+        - $ref: "#/components/parameters/resource_name"
+      responses:
+        "200":
+          description: Group, synthetic remainder, or resource-month leaf rows in an envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupedResourcesEnvelope"
+        "400":
+          $ref: "#/components/responses/Validation"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/costs/resources/{ocid}:
     get:
       tags: [costs]
@@ -376,6 +436,45 @@ components:
                         cost:
                           type: string
                           description: Decimal string, never a float.
+    GroupedResourcesEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                oneOf:
+                  - $ref: "#/components/schemas/GroupedResourceGroup"
+                  - $ref: "#/components/schemas/GroupedResourceLeaf"
+                discriminator:
+                  propertyName: kind
+    GroupedResourceGroup:
+      type: object
+      required: [kind, depth, group_value, currency, subtotal_cost, row_count]
+      properties:
+        kind: {type: string, enum: [group, other]}
+        depth: {type: integer, minimum: 0}
+        group_value: {type: string}
+        currency: {type: string, enum: [USD]}
+        subtotal_cost: {type: string, description: Decimal string.}
+        row_count: {type: integer}
+    GroupedResourceLeaf:
+      type: object
+      required: [kind, period, environment, cost_center, component_type, compartment, service, resource_type, resource_name, ocid, currency, cost]
+      properties:
+        kind: {type: string, enum: [leaf]}
+        period: {type: string, example: "2026-07"}
+        environment: {type: string}
+        cost_center: {type: string}
+        component_type: {type: string}
+        compartment: {type: string}
+        service: {type: string}
+        resource_type: {type: string}
+        resource_name: {type: string}
+        ocid: {type: string}
+        currency: {type: string, enum: [USD]}
+        cost: {type: string, description: Decimal string.}
   responses:
     Ok:
       description: Success envelope; rows in `data`, freshness/pagination in `meta`

@@ -14,6 +14,10 @@ const (
 	rtypeExpr        = "tags['ATD-Ops.ResourceType']"
 	rnameExpr        = "tags['ATD-Ops.ResourceName']"
 	rnameDisplayExpr = "if(empty(" + rnameExpr + "), concat('untagged · ', product_service, ' · …', right(product_resourceid, 8)), " + rnameExpr + ")"
+	// Grouping expression: untagged resources collapse into one empty-valued bucket
+	// (surfaced as "(untagged)" in the UI) rather than fragmenting per-OCID like the
+	// display expression does.
+	rnameGroupExpr = "if(empty(" + rnameExpr + "), '', " + rnameExpr + ")"
 )
 
 var dimensions = map[string]string{
@@ -22,6 +26,14 @@ var dimensions = map[string]string{
 }
 var sorts = map[string]string{"cost": "cost", "resource_name": "resource_name", "service": "service", "compartment": "compartment"}
 var buckets = map[string]string{"hour": "toStartOfHour", "day": "toStartOfDay", "week": "toMonday", "month": "toStartOfMonth"}
+
+const groupedResourcesLimit = 200
+
+var groupedResourceDimensions = map[string]string{
+	"service": "product_service", "compartment": "product_compartmentname", "environment": envExpr,
+	"cost_center": ccExpr, "component_type": compExpr, "resource_type": rtypeExpr, "resource_name": rnameGroupExpr,
+	"period": "formatDateTime(toStartOfMonth(lineitem_intervalusagestart), '%Y-%m')",
+}
 
 func where(f Filters) (string, []any) {
 	parts := []string{"lineitem_intervalusagestart >= ?", "lineitem_intervalusagestart < ?"}
@@ -115,6 +127,130 @@ func ResourcesQuery(f Filters, p Page) (Query, error) {
 	w, a := where(f)
 	a = append(a, p.Limit, p.Offset)
 	return Query{fmt.Sprintf("SELECT product_resourceid ocid, any(%s) resource_name, any(product_service) service, any(product_compartmentname) compartment, any(product_region) region, any(%s) environment, any(%s) cost_center, any(%s) component_type, any(%s) resource_type, cost_currencycode currency, round(sum(cost_attributedcost), 2) cost, count() OVER () total FROM %s WHERE %s GROUP BY ocid, currency ORDER BY %s %s LIMIT ? OFFSET ?", rnameDisplayExpr, envExpr, ccExpr, compExpr, rtypeExpr, SourceView, w, sort, direction), a}, nil
+}
+
+// ValidGroupedResourceDimension excludes OCID because it identifies a leaf, not a group.
+func ValidGroupedResourceDimension(dimension string) bool {
+	_, ok := groupedResourceDimensions[dimension]
+	return ok
+}
+
+// GroupedResourcesQuery selects either group rows or resource-month leaves for one
+// expansion level. Values only ever become query arguments; dimensions come from the
+// service-owned allowlist above.
+func GroupedResourcesQuery(f Filters, group1, group2, group1Value, group2Value, search string, hideZero bool) (Query, error) {
+	group1Column, ok := groupedResourceDimensions[group1]
+	if !ok {
+		return Query{}, fmt.Errorf("unsupported grouped resource dimension")
+	}
+	if group2 != "" && !ValidGroupedResourceDimension(group2) {
+		return Query{}, fmt.Errorf("unsupported grouped resource dimension")
+	}
+	if group1 == group2 && group2 != "" {
+		return Query{}, fmt.Errorf("group dimensions must differ")
+	}
+
+	w, args := where(f)
+	w += " AND cost_currencycode = 'USD'"
+	if group1Value != "" {
+		w, args = groupedResourceScope(w, args, group1Column, group1, group1Value)
+	}
+	if group2Value != "" {
+		w, args = groupedResourceScope(w, args, groupedResourceDimensions[group2], group2, group2Value)
+	}
+	if term := strings.TrimSpace(search); term != "" {
+		pattern := "%" + term + "%"
+		columns := []string{rnameDisplayExpr, "product_resourceid", "product_service", "product_compartmentname", "product_region", rtypeExpr, envExpr, ccExpr, compExpr}
+		matches := make([]string, len(columns))
+		for i, column := range columns {
+			matches[i] = column + " ILIKE ?"
+			args = append(args, pattern)
+		}
+		w += " AND (" + strings.Join(matches, " OR ") + ")"
+	}
+
+	// Hide-noise: drop groups/leaves whose rounded cost is exactly zero.
+	having := ""
+	if hideZero {
+		having = "\n  HAVING round(sum(cost_attributedcost), 2) != 0"
+	}
+
+	if group1Value == "" {
+		return groupedResourceGroupsQuery(w, args, group1Column, 0, having), nil
+	}
+	if group2 != "" && group2Value == "" {
+		return groupedResourceGroupsQuery(w, args, groupedResourceDimensions[group2], 1, having), nil
+	}
+	depth := 1
+	if group2 != "" {
+		depth = 2
+	}
+	return groupedResourceLeavesQuery(w, args, depth, having), nil
+}
+
+func groupedResourceScope(w string, args []any, column, dimension, value string) (string, []any) {
+	// Untagged selects empty-tag rows via `column = ''`. resource_name is included
+	// here (unlike the flat filter) because its grouping expression maps untagged to
+	// '' — see rnameGroupExpr. period is excluded: its bucket is never empty.
+	if value == "__untagged__" && dimension != "period" {
+		return w + " AND " + column + " = ''", args
+	}
+	return w + " AND " + column + " = ?", append(args, value)
+}
+
+func groupedResourceGroupsQuery(w string, args []any, column string, depth int, having string) Query {
+	return Query{fmt.Sprintf(`WITH grouped AS (
+  SELECT %[1]s group_value, sum(cost_attributedcost) subtotal_cost, count() row_count
+  FROM %[2]s WHERE %[3]s
+  GROUP BY group_value%[6]s
+), ranked AS (
+  SELECT *, row_number() OVER (ORDER BY subtotal_cost DESC) rank FROM grouped
+)
+SELECT kind, depth, group_value, currency, toString(round(sort_cost, 2)) subtotal_cost, row_count
+FROM (
+  SELECT 'group' kind, %[4]d depth, group_value, 'USD' currency, subtotal_cost sort_cost, row_count, 0 is_other
+  FROM ranked WHERE rank <= %[5]d
+  UNION ALL
+  SELECT 'other' kind, %[4]d depth, 'Other' group_value, 'USD' currency, sum(subtotal_cost) sort_cost, sum(row_count) row_count, 1 is_other
+  FROM ranked WHERE rank > %[5]d HAVING count() > 0
+)
+ORDER BY is_other, sort_cost DESC`, column, SourceView, w, depth, groupedResourcesLimit, having), args}
+}
+
+func groupedResourceLeavesQuery(w string, args []any, depth int, having string) Query {
+	period := groupedResourceDimensions["period"]
+	return Query{fmt.Sprintf(`WITH leaves AS (
+  SELECT product_resourceid ocid,
+         any(%[1]s) resource_name,
+         any(product_service) service,
+         any(product_compartmentname) compartment,
+         any(product_region) region,
+         any(%[2]s) environment,
+         any(%[3]s) cost_center,
+         any(%[4]s) component_type,
+         any(%[5]s) resource_type,
+         %[6]s period,
+         sum(cost_attributedcost) cost,
+         count() row_count
+  FROM %[7]s WHERE %[8]s
+  GROUP BY ocid, period%[11]s
+), ranked AS (
+  SELECT *, row_number() OVER (ORDER BY cost DESC) rank FROM leaves
+)
+SELECT kind, depth, group_value, currency, subtotal_cost, row_count,
+       period, environment, cost_center, component_type, compartment, service, resource_type, resource_name, ocid, cost
+FROM (
+  SELECT 'leaf' kind, %[9]d depth, '' group_value, 'USD' currency, '' subtotal_cost, 0 row_count,
+         period, environment, cost_center, component_type, compartment, service, resource_type, resource_name, ocid,
+         toString(round(ranked.cost, 2)) cost, ranked.cost sort_cost, 0 is_other
+  FROM ranked WHERE rank <= %[10]d
+  UNION ALL
+  SELECT 'other' kind, %[9]d depth, 'Other' group_value, 'USD' currency,
+         toString(round(sum(ranked.cost), 2)) subtotal_cost, sum(row_count),
+         '', '', '', '', '', '', '', '', '', '', sum(ranked.cost) sort_cost, 1 is_other
+  FROM ranked WHERE rank > %[10]d HAVING count() > 0
+)
+ORDER BY is_other, sort_cost DESC`, rnameDisplayExpr, envExpr, ccExpr, compExpr, rtypeExpr, period, SourceView, w, depth, groupedResourcesLimit, having), args}
 }
 
 func ResourceQuery(f Filters, ocid string) Query {
