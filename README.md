@@ -33,6 +33,8 @@ When `rname` is blank, every resource-name API value uses the composite `untagge
 - `GET /v1/costs/resources/grouped?group1=environment&group2=cost_center&grain=month` -- grouped USD-only resource-month rows for the direct Resources view; use `group1_value` and `group2_value` to expand a parent, and `q` for server-side case-insensitive text search
 - `GET /v1/costs/resources/{ocid}` — accepts the shared date and dimension filters in addition to the path OCID, so detail cost stays scoped to the originating Resources view
 - `GET /v1/costs/lineitems?resource_name=X&granularity=day|week|month` (or `ocid=X`) — bucketed cost detail under shared filters; resource name and OCID are optional narrowers, and granularity defaults to day
+- `GET /v1/costs/anomalies?dimension=service&window=28&min_z=3&min_impact=50` — daily cost anomalies per dimension value via robust MAD z-score; see "Trends & anomalies" below
+- `GET /v1/costs/trends?dimension=service&granularity=day` — period-over-period cost trend per dimension value with a fitted slope; see "Trends & anomalies" below
 - `GET /v1/costs/filters` — accepts the shared filters and returns only values valid under them, enabling cascading filter controls.
 - `GET /v1/costs/freshness`
 - `GET /openapi.yaml` — embedded OpenAPI 3.0 spec
@@ -97,6 +99,80 @@ flowchart LR
   Validate --> Query["bound ClickHouse grouped query"]
   Query --> View["oci_cost_report_attributed"]
   View --> Shape["group / other / leaf envelope rows"]
+  Shape --> Client
+```
+
+## Trends & anomalies
+
+Both endpoints analyze cost at any allowlisted dimension level (`service`,
+`compartment`, `environment`, `cost_center`, `component_type`, `resource_type`,
+`resource_name`) and accept all shared filters. All analysis runs as bounded
+ClickHouse SQL per request; no tables or scheduled jobs are created, and the
+scanned range is capped by the request dates, so cost stays flat as the table
+grows.
+
+### GET /v1/costs/anomalies
+
+Robust z-score anomaly detection: each day's cost is compared against the
+median of the trailing `window` days, scaled by the window's median absolute
+deviation (MAD, rescaled by 0.6745). MAD baselines resist inflation from past
+spikes, which is why this beats plain mean/stddev on heavy-tailed cost data.
+The current (partial) day is excluded, warm-up requires `window/2` prior
+observations, and z is clamped to ±99 when MAD is ~0.
+
+| Parameter | Default | Purpose |
+|---|---:|---|
+| `dimension` | `service` | Level to analyze (allowlisted dimensions above) |
+| `window` | 28 | Trailing baseline window in days (7–90) |
+| `min_z` | 3 | Minimum absolute z-score to report (1–20); severity is `warning` below 5, `critical` at ≥5 |
+| `min_impact` | 50 | Minimum absolute deviation from baseline in currency units — suppresses tiny-series noise |
+
+```http
+GET /v1/costs/anomalies?dimension=service&start=2026-06-13T00:00:00Z&end=2026-07-13T00:00:00Z
+```
+
+```json
+{"data":[{"dimension_value":"COMPUTE","currency":"USD","day":"2026-07-07","cost":1286.17,"baseline":297.08,"deviation":989.09,"z_score":24.96,"severity":"critical","direction":"spike"}],"meta":{"dimension":"service","method":"mad_zscore","window":28,"min_z":3,"min_impact":50,"freshness":{}},"error":null}
+```
+
+```mermaid
+flowchart LR
+  Client --> Handler["anomalies handler"]
+  Handler --> Validate["validate dimension / window / min_z / min_impact"]
+  Validate --> Query["AnomaliesQuery: daily sums → rolling median → rolling MAD → z-score"]
+  Query --> View["oci_cost_report_attributed (scan widened by window days)"]
+  View --> Filter["z ≥ min_z, |deviation| ≥ min_impact, partial day dropped"]
+  Filter --> Client
+```
+
+### GET /v1/costs/trends
+
+Compares the requested period against the equal-length period immediately
+before it, per dimension value. `slope` is the fitted cost change per day over
+the current period (`simpleLinearRegression`). `direction` is `rising`,
+`falling`, `flat` (change under 5%), `new` (no prior spend), or `gone` (spend
+stopped).
+
+| Parameter | Default | Purpose |
+|---|---:|---|
+| `dimension` | `service` | Level to analyze (allowlisted dimensions above) |
+| `granularity` | `day` | Bucket size for the slope fit: `day`, `week`, or `month` |
+
+```http
+GET /v1/costs/trends?dimension=cost_center&start=2026-06-13T00:00:00Z&end=2026-07-13T00:00:00Z
+```
+
+```json
+{"data":[{"dimension_value":"Treadsy","currency":"USD","current_cost":917.52,"previous_cost":386.42,"change_amount":531.10,"change_pct":137.44,"slope":0.7369,"direction":"rising"}],"meta":{"dimension":"cost_center","granularity":"day","freshness":{}},"error":null}
+```
+
+```mermaid
+flowchart LR
+  Client --> Handler["trends handler"]
+  Handler --> Validate["validate dimension / granularity"]
+  Validate --> Query["TrendsQuery: one scan over both periods, sumIf split at start"]
+  Query --> View["oci_cost_report_attributed"]
+  View --> Shape["current vs previous, change %, regression slope, direction"]
   Shape --> Client
 ```
 

@@ -106,6 +106,92 @@ paths:
           $ref: "#/components/responses/Validation"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/costs/anomalies:
+    get:
+      tags: [costs]
+      summary: Daily cost anomalies per dimension value (robust MAD z-score)
+      description: >
+        Flags days whose cost deviates from the trailing `window`-day median by a
+        robust z-score (median absolute deviation based). Rows include baseline,
+        deviation, z_score, severity (warning ≥ min_z, critical ≥ 5) and direction
+        (spike/drop). The current, partial day is excluded.
+      parameters:
+        - name: dimension
+          in: query
+          schema:
+            type: string
+            enum: [service, compartment, environment, cost_center, component_type, resource_type, resource_name]
+            default: service
+        - name: window
+          in: query
+          description: Trailing baseline window in days
+          schema: {type: integer, default: 28, minimum: 7, maximum: 90}
+        - name: min_z
+          in: query
+          description: Minimum absolute robust z-score to report
+          schema: {type: number, default: 3, minimum: 1, maximum: 20}
+        - name: min_impact
+          in: query
+          description: Minimum absolute deviation from baseline (currency units)
+          schema: {type: number, default: 50, minimum: 0}
+        - $ref: "#/components/parameters/start"
+        - $ref: "#/components/parameters/end"
+        - $ref: "#/components/parameters/env"
+        - $ref: "#/components/parameters/cost_center"
+        - $ref: "#/components/parameters/component_type"
+        - $ref: "#/components/parameters/compartment"
+        - $ref: "#/components/parameters/service"
+        - $ref: "#/components/parameters/resource_type"
+        - $ref: "#/components/parameters/resource_name"
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/Validation"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/costs/trends:
+    get:
+      tags: [costs]
+      summary: Period-over-period trend per dimension value
+      description: >
+        Compares the requested period against the equal-length period immediately
+        before it. Rows include current_cost, previous_cost, change_amount,
+        change_pct, slope (fitted cost change per day over the current period) and
+        direction (rising/falling/flat/new/gone; flat when the change is under 5%).
+      parameters:
+        - name: dimension
+          in: query
+          schema:
+            type: string
+            enum: [service, compartment, environment, cost_center, component_type, resource_type, resource_name]
+            default: service
+        - name: granularity
+          in: query
+          description: >
+            Time-axis resolution of the slope fit only; the current/previous
+            period split is always day-exact, so unaligned starts are safe.
+            slope remains a per-day rate.
+          schema:
+            type: string
+            enum: [day, week, month]
+            default: day
+        - $ref: "#/components/parameters/start"
+        - $ref: "#/components/parameters/end"
+        - $ref: "#/components/parameters/env"
+        - $ref: "#/components/parameters/cost_center"
+        - $ref: "#/components/parameters/component_type"
+        - $ref: "#/components/parameters/compartment"
+        - $ref: "#/components/parameters/service"
+        - $ref: "#/components/parameters/resource_type"
+        - $ref: "#/components/parameters/resource_name"
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/Validation"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/costs/breakdown:
     get:
       tags: [costs]

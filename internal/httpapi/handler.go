@@ -33,6 +33,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/costs/resources", h.resources)
 	mux.HandleFunc("GET /v1/costs/resources/{ocid}", h.resource)
 	mux.HandleFunc("GET /v1/costs/lineitems", h.lineItems)
+	mux.HandleFunc("GET /v1/costs/anomalies", h.anomalies)
+	mux.HandleFunc("GET /v1/costs/trends", h.trends)
 	mux.HandleFunc("GET /v1/costs/filters", h.filters)
 	mux.HandleFunc("GET /v1/costs/freshness", h.freshness)
 	mux.HandleFunc("GET /openapi.yaml", openapiSpec)
@@ -387,6 +389,74 @@ func (h *Handler) lineItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.run(w, r, query, map[string]any{"granularity": granularity})
+}
+
+func boundedFloat(raw string, fallback, min, max float64) (float64, error) {
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || value < min || value > max {
+		return 0, fmt.Errorf("must be between %g and %g", min, max)
+	}
+	return value, nil
+}
+
+func (h *Handler) anomalies(w http.ResponseWriter, r *http.Request) {
+	f, err := h.parseFilters(r)
+	if err != nil {
+		bad(w, err)
+		return
+	}
+	q := r.URL.Query()
+	dimension := q.Get("dimension")
+	if dimension == "" {
+		dimension = "service"
+	}
+	window, err := boundedInt(q.Get("window"), 28, 7, 90)
+	if err != nil {
+		bad(w, fmt.Errorf("window %w", err))
+		return
+	}
+	minZ, err := boundedFloat(q.Get("min_z"), 3, 1, 20)
+	if err != nil {
+		bad(w, fmt.Errorf("min_z %w", err))
+		return
+	}
+	minImpact, err := boundedFloat(q.Get("min_impact"), 50, 0, 1e9)
+	if err != nil {
+		bad(w, fmt.Errorf("min_impact %w", err))
+		return
+	}
+	query, err := cost.AnomaliesQuery(f, dimension, window, minZ, minImpact)
+	if err != nil {
+		bad(w, err)
+		return
+	}
+	h.run(w, r, query, map[string]any{"dimension": dimension, "method": "mad_zscore", "window": window, "min_z": minZ, "min_impact": minImpact})
+}
+
+func (h *Handler) trends(w http.ResponseWriter, r *http.Request) {
+	f, err := h.parseFilters(r)
+	if err != nil {
+		bad(w, err)
+		return
+	}
+	q := r.URL.Query()
+	dimension := q.Get("dimension")
+	if dimension == "" {
+		dimension = "service"
+	}
+	granularity := q.Get("granularity")
+	if granularity == "" {
+		granularity = "day"
+	}
+	query, err := cost.TrendsQuery(f, dimension, granularity)
+	if err != nil {
+		bad(w, err)
+		return
+	}
+	h.run(w, r, query, map[string]any{"dimension": dimension, "granularity": granularity})
 }
 
 func (h *Handler) filters(w http.ResponseWriter, r *http.Request) {

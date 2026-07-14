@@ -269,6 +269,90 @@ func LineItemsRollupQuery(f Filters, granularity string) (Query, error) {
 	return Query{fmt.Sprintf("SELECT %s(lineitem_intervalusagestart) bucket, cost_currencycode currency, round(sum(cost_attributedcost), 2) cost, round(sum(cost_mycost), 2) my_cost, count() line_items, countIf(cost_overageflag = 'Y') overage_items FROM %s WHERE %s GROUP BY bucket, currency ORDER BY bucket DESC, currency", bucket, SourceView, w), a}, nil
 }
 
+// AnomaliesQuery flags days whose cost deviates from the trailing-window median
+// by a robust z-score: 0.6745 * (cost - median) / MAD. MAD-based scoring resists
+// baseline inflation from past spikes, unlike mean/stddev. The two window levels
+// exist because ClickHouse rejects nested window aggregates (ILLEGAL_AGGREGATION);
+// MAD is therefore computed against each day's own rolling median. z is clamped to
+// ±99 for near-zero MAD, and the current (partial) day is excluded.
+func AnomaliesQuery(f Filters, dimension string, window int, minZ, minImpact float64) (Query, error) {
+	column, ok := dimensions[dimension]
+	if !ok {
+		return Query{}, fmt.Errorf("unsupported dimension")
+	}
+	// Widen the scan so the first reported day has a full baseline behind it.
+	warm := f
+	warm.Start = f.Start.AddDate(0, 0, -window)
+	w, a := where(warm)
+	minObs := window / 2
+	a = append(a, f.Start, minObs, minImpact, minZ)
+	return Query{fmt.Sprintf(`WITH daily AS (
+  SELECT %[1]s dimension_value, cost_currencycode currency, toDate(lineitem_intervalusagestart) day, toFloat64(sum(cost_attributedcost)) cost
+  FROM %[2]s WHERE %[3]s
+  GROUP BY dimension_value, currency, day
+), base AS (
+  SELECT *, medianExact(cost) OVER w baseline, count(*) OVER w n
+  FROM daily WINDOW w AS (PARTITION BY dimension_value, currency ORDER BY day ROWS BETWEEN %[4]d PRECEDING AND 1 PRECEDING)
+), scored AS (
+  SELECT *, medianExact(abs(cost - baseline)) OVER w mad
+  FROM base WINDOW w AS (PARTITION BY dimension_value, currency ORDER BY day ROWS BETWEEN %[4]d PRECEDING AND 1 PRECEDING)
+), final AS (
+  SELECT dimension_value, currency, day, cost, baseline, n,
+         round(greatest(least(0.6745 * (cost - baseline) / nullIf(mad, 0), 99), -99), 2) z_score
+  FROM scored
+)
+SELECT dimension_value, currency, day, round(cost, 2) cost, round(baseline, 2) baseline,
+       round(cost - baseline, 2) deviation, z_score,
+       if(abs(z_score) >= 5, 'critical', 'warning') severity,
+       if(cost > baseline, 'spike', 'drop') direction
+FROM final
+WHERE day >= toDate(?) AND day < toDate(now('UTC')) AND n >= ? AND abs(cost - baseline) >= ? AND abs(z_score) >= ?
+ORDER BY day DESC, abs(z_score) DESC`, column, SourceView, w, window), a}, nil
+}
+
+// TrendsQuery compares the requested period against the equal-length period
+// immediately before it, per dimension value. slope is the per-day rate of change
+// fitted over the current period's buckets (simpleLinearRegression, x in days).
+func TrendsQuery(f Filters, dimension, granularity string) (Query, error) {
+	column, ok := dimensions[dimension]
+	if !ok {
+		return Query{}, fmt.Errorf("unsupported dimension")
+	}
+	bucket, ok := buckets[granularity]
+	if !ok || granularity == "hour" {
+		return Query{}, fmt.Errorf("granularity must be day, week or month")
+	}
+	// One scan covers both periods; sumIf splits them at f.Start.
+	span := f
+	span.Start = f.Start.Add(-f.End.Sub(f.Start))
+	w, a := where(span)
+	a = append(a, f.Start, f.Start, f.Start)
+	// Periods split on day buckets so a week/month straddling f.Start cannot leak
+	// current-period spend into previous_cost; granularity only coarsens the slope
+	// fit's time axis (slope stays a per-day rate).
+	return Query{fmt.Sprintf(`WITH per_day AS (
+  SELECT %[1]s dimension_value, cost_currencycode currency, toStartOfDay(lineitem_intervalusagestart) day, toFloat64(sum(cost_attributedcost)) cost
+  FROM %[2]s WHERE %[3]s
+  GROUP BY dimension_value, currency, day
+), agg AS (
+  SELECT dimension_value, currency,
+         sumIf(cost, day >= ?) current_cost,
+         sumIf(cost, day < ?) previous_cost,
+         (simpleLinearRegressionIf(toFloat64(toUnixTimestamp(toDateTime(%[4]s(day)))) / 86400, cost, day >= ?)).1 slope
+  FROM per_day GROUP BY dimension_value, currency
+)
+SELECT dimension_value, currency, round(current_cost, 2) current_cost, round(previous_cost, 2) previous_cost,
+       round(current_cost - previous_cost, 2) change_amount,
+       round((current_cost - previous_cost) / nullIf(previous_cost, 0) * 100, 2) change_pct,
+       if(isFinite(slope), round(slope, 4), NULL) slope,
+       multiIf(previous_cost = 0 AND current_cost > 0, 'new',
+               current_cost = 0 AND previous_cost > 0, 'gone',
+               abs(current_cost - previous_cost) / nullIf(previous_cost, 0) * 100 < 5, 'flat',
+               current_cost > previous_cost, 'rising', 'falling') direction
+FROM agg
+ORDER BY abs(current_cost - previous_cost) DESC`, column, SourceView, w, bucket), a}, nil
+}
+
 func FiltersQuery(f Filters) Query {
 	w, a := where(f)
 	return Query{fmt.Sprintf("SELECT groupUniqArray(1000)(%s) environments, groupUniqArray(1000)(%s) cost_centers, groupUniqArray(1000)(%s) component_types, groupUniqArray(1000)(product_compartmentname) compartments, groupUniqArray(1000)(product_service) services, groupUniqArray(1000)(%s) resource_types, groupUniqArray(1000)(%s) resource_names FROM %s WHERE %s", envExpr, ccExpr, compExpr, rtypeExpr, rnameDisplayExpr, SourceView, w), a}

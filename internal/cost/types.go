@@ -5,7 +5,9 @@ import (
 	"time"
 )
 
-const SourceView = "oci_cost_report_attributed"
+// Materialized (REFRESH EVERY 1 DAY) copy of the oci_cost_report_attributed view;
+// the raw view recomputes tag attribution per query and full-scans history.
+const SourceView = "oci_cost_report_attributed_mv"
 
 var RequiredTags = map[string]string{
 	"env": "ATD-Billing.Environment", "cost_center": "ATD-Billing.CostCenter",

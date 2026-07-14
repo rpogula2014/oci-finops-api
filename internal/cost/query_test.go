@@ -191,3 +191,94 @@ func TestGroupedResourcesQueryHandlesUntaggedAndRejectsInvalidDimensions(t *test
 		}
 	}
 }
+
+func TestAnomaliesQuery(t *testing.T) {
+	query, err := AnomaliesQuery(fixture(), "service", 28, 3, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(query.SQL, "Compute' OR 1=1") {
+		t.Fatal("user value interpolated into SQL")
+	}
+	if !strings.Contains(query.SQL, "ROWS BETWEEN 28 PRECEDING AND 1 PRECEDING") {
+		t.Fatalf("window not applied: %s", query.SQL)
+	}
+	if !strings.Contains(query.SQL, "day < toDate(now('UTC'))") {
+		t.Fatal("partial current day must be excluded")
+	}
+	// warm-up start (28 days before Start) must be the first bound arg
+	warm, ok := query.Args[0].(time.Time)
+	if !ok || !warm.Equal(time.Date(2025, 12, 4, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("expected widened start, got %v", query.Args[0])
+	}
+	// trailing args: report start, min observations, min impact, min z
+	n := len(query.Args)
+	if query.Args[n-3] != 14 || query.Args[n-2] != 50.0 || query.Args[n-1] != 3.0 {
+		t.Fatalf("unexpected trailing args: %v", query.Args[n-3:])
+	}
+	if _, err := AnomaliesQuery(fixture(), "cost); DROP TABLE x", 28, 3, 50); err == nil {
+		t.Fatal("expected dimension rejection")
+	}
+}
+
+func TestTrendsQuery(t *testing.T) {
+	query, err := TrendsQuery(fixture(), "cost_center", "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(query.SQL, "Compute' OR 1=1") {
+		t.Fatal("user value interpolated into SQL")
+	}
+	// previous period start = Start - (End - Start) = 2025-12-01
+	prev, ok := query.Args[0].(time.Time)
+	if !ok || !prev.Equal(time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("expected doubled-back start, got %v", query.Args[0])
+	}
+	if !strings.Contains(query.SQL, "simpleLinearRegressionIf") {
+		t.Fatal("slope fit missing")
+	}
+	if _, err := TrendsQuery(fixture(), "bogus", "day"); err == nil {
+		t.Fatal("expected dimension rejection")
+	}
+	if _, err := TrendsQuery(fixture(), "service", "hour"); err == nil {
+		t.Fatal("expected granularity rejection")
+	}
+	if _, err := TrendsQuery(fixture(), "service", "minute"); err == nil {
+		t.Fatal("expected granularity rejection")
+	}
+}
+
+func TestTrendsSlopeGuardsNonFinite(t *testing.T) {
+	query, err := TrendsQuery(fixture(), "resource_name", "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// single-bucket series produce NaN slopes; unguarded they abort JSON encoding
+	if !strings.Contains(query.SQL, "isFinite(slope)") {
+		t.Fatalf("slope must be guarded against NaN/Inf: %s", query.SQL)
+	}
+}
+
+func TestTrendsPeriodSplitIsDayExact(t *testing.T) {
+	query, err := TrendsQuery(fixture(), "service", "week")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a week bucket straddling Start must not drag current-period days into previous_cost
+	if !strings.Contains(query.SQL, "sumIf(cost, day >= ?)") || !strings.Contains(query.SQL, "sumIf(cost, day < ?)") {
+		t.Fatalf("period split must be on day buckets: %s", query.SQL)
+	}
+	if !strings.Contains(query.SQL, "toMonday(day)") {
+		t.Fatalf("granularity must only coarsen the slope axis: %s", query.SQL)
+	}
+}
+
+func TestAnomaliesPartialDayCutoffIsUTC(t *testing.T) {
+	query, err := AnomaliesQuery(fixture(), "service", 28, 3, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(query.SQL, "toDate(now('UTC'))") {
+		t.Fatal("partial-day cutoff must use UTC to match the data timezone")
+	}
+}
